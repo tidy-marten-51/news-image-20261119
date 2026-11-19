@@ -1,19 +1,24 @@
 #!/usr/bin/env python3
-"""Entry for make.fun news-image-20261119 (Python 3.13, standard library only).
+"""Publish the 19 November 2026 front page for make.fun's news-image-20261119.
 
-The entry is a newspaper front page for Thursday, 19 November 2026, drawn
-by draw_frontpage.py into ``entry.png`` next to this file: the Trump-Xi-Putin
-trilateral summit in Shenzhen leads, with the oil tankers burning off the
-Strait of Hormuz and the worldwide launch of GTA VI below, plus four more
-stories of the day. This program is the whole runtime behaviour: it validates
-the image against the competition gate (a whole PNG, at most 1 MiB, at most
-1024 by 1024 pixels) and copies it, byte for byte, to ``/output/entry.png``.
+The picture itself is baked into this repository: draw_frontpage.py
+renders the newspaper page into entry.png, and this program — the only
+code the grader runs — checks that picture against the competition's
+gate and hands it over byte for byte.
 
-Determinism: the copy is a plain byte copy of a fixed file, so two runs
-write identical bytes. No network is used at runtime; the image is baked
-into the repository.
+What it does, in order:
+  1. reads entry.png from beside this file;
+  2. refuses anything that is not a whole PNG inside the gate (at most
+     1 MiB, at most 1024 by 1024 pixels, ending in a proper IEND chunk);
+  3. copies those exact bytes to /output/entry.png
+     (MAKEFUN_OUTPUT_DIR stands in for /output outside the grader);
+  4. re-reads what it wrote and fails loudly if a single byte differs.
 
-Run outside the grader's container with:
+Two runs therefore write the same bytes: the input is fixed, the copy
+is a plain byte copy, and nothing here touches the network or the clock.
+Python 3.13, standard library only.
+
+Try it outside the grader with:
     mkdir -p out && MAKEFUN_OUTPUT_DIR=out python3 main.py
 """
 
@@ -21,71 +26,81 @@ from __future__ import annotations
 
 import hashlib
 import os
-import shutil
-import struct
 import sys
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-SOURCE = HERE / "entry.png"
+BASE = Path(__file__).parent.resolve()
+PICTURE = BASE / "entry.png"
 
-MAX_BYTES = 1_048_576          # the gate's 1 MiB cap
-MAX_SIDE = 1024                # the gate's 1024 by 1024 cap
-PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+BYTE_CAP = 1_048_576
+EDGE_CAP = 1024
+PNG_HEAD = b"\x89PNG\r\n\x1a\n"
 
 
-def read_png_size(data: bytes) -> tuple[int, int]:
-    """Return (width, height) from a PNG's IHDR chunk, or raise ValueError.
+class GateError(ValueError):
+    """Raised when entry.png breaks one of the competition's limits."""
 
-    Parses the header by hand instead of importing an image library, so the
-    program stays standard-library only: magic, then the 25-byte IHDR
-    chunk (length, type, width, height, ...), big-endian.
+
+def png_dimensions(blob: bytes) -> tuple[int, int]:
+    """Pull (width, height) out of a PNG's IHDR chunk.
+
+    The header is parsed by hand so the program needs no image library:
+    eight magic bytes, then a 13-byte IHDR chunk whose first eight payload
+    bytes are the width and height, big-endian.
     """
-    if len(data) < 33 or data[:8] != PNG_MAGIC:
-        raise ValueError("entry.png is not a PNG file")
-    length, chunk_type = struct.unpack(">I4s", data[8:16])
-    if chunk_type != b"IHDR" or length != 13:
-        raise ValueError("entry.png has no IHDR chunk where one belongs")
-    width, height = struct.unpack(">II", data[16:24])
-    # The gate reads a whole image, so refuse a truncated file: the last
-    # 12 bytes must be the IEND chunk (length 0, type IEND, CRC).
-    if len(data) < 45 or data[-12:-8] != b"\x00\x00\x00\x00" or data[-8:-4] != b"IEND":
-        raise ValueError("entry.png is truncated: no IEND chunk at the end")
+    if len(blob) < 33 or blob[:8] != PNG_HEAD:
+        raise GateError("entry.png does not start with the PNG signature")
+    size, kind = int.from_bytes(blob[8:12], "big"), blob[12:16]
+    if kind != b"IHDR" or size != 13:
+        raise GateError("entry.png has no IHDR chunk in second place")
+    width = int.from_bytes(blob[16:20], "big")
+    height = int.from_bytes(blob[20:24], "big")
+    # IHDR's remaining fields sit right after the dimensions: one byte of
+    # bit depth, one of colour type, then compression, filter and interlace
+    # flags. A gate-worthy PNG uses a depth and colour type the format
+    # actually defines, so refuse anything outside those sets.
+    depth, colour = blob[24], blob[25]
+    if depth not in (1, 2, 4, 8, 16) or colour not in (0, 2, 3, 4, 6):
+        raise GateError(
+            f"entry.png has an impossible IHDR: depth {depth}, colour {colour}")
+    if len(blob) < 45 or blob[-12:-8] != b"\x00\x00\x00\x00" \
+            or blob[-8:-4] != b"IEND":
+        raise GateError("entry.png is cut short: no IEND chunk at its end")
     return width, height
 
 
-def validate(data: bytes) -> tuple[int, int]:
-    """Check the gate's limits; return the image dimensions."""
-    if len(data) > MAX_BYTES:
-        raise ValueError(
-            f"entry.png is {len(data)} bytes, over the {MAX_BYTES} byte cap")
-    width, height = read_png_size(data)
-    if width > MAX_SIDE or height > MAX_SIDE:
-        raise ValueError(
-            f"entry.png is {width}x{height}, over the {MAX_SIDE}x{MAX_SIDE} cap")
+def check_image(blob: bytes) -> tuple[int, int]:
+    """Apply the gate's limits to the raw bytes; return the dimensions."""
+    if len(blob) > BYTE_CAP:
+        raise GateError(
+            f"entry.png is {len(blob)} bytes, past the {BYTE_CAP} cap")
+    width, height = png_dimensions(blob)
+    if width > EDGE_CAP or height > EDGE_CAP:
+        raise GateError(
+            f"entry.png is {width}x{height}, past the {EDGE_CAP}x{EDGE_CAP} cap")
     if width <= 0 or height <= 0:
-        raise ValueError(f"entry.png has impossible dimensions {width}x{height}")
+        raise GateError(f"entry.png claims impossible size {width}x{height}")
     return width, height
+
+
+def publish_copy(blob: bytes) -> Path:
+    """Write blob to the output directory and prove it landed intact."""
+    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / "entry.png"
+    target.write_bytes(blob)
+    if target.read_bytes() != blob:
+        raise GateError("the copy in the output directory differs")
+    return target
 
 
 def main() -> int:
-    out_dir = Path(os.environ.get("MAKEFUN_OUTPUT_DIR", "/output"))
-    if not SOURCE.is_file():
-        raise ValueError(
-            f"{SOURCE.name} is missing next to main.py: the image is baked "
-            "into the repository, so a missing file means a bad checkout")
-    data = SOURCE.read_bytes()
-    width, height = validate(data)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / "entry.png"
-    # A byte copy, not a re-encode: the judge sees exactly the bytes the
-    # repository holds, and a second run writes the same bytes again.
-    shutil.copyfile(SOURCE, target)
-    written = target.read_bytes()
-    if written != data:
-        raise ValueError("the copy does not match entry.png byte for byte")
-    digest = hashlib.sha256(written).hexdigest()
-    print(f"wrote {target} ({width}x{height}, {len(data)} bytes, sha256 {digest})")
+    blob = PICTURE.read_bytes()
+    width, height = check_image(blob)
+    target = publish_copy(blob)
+    digest = hashlib.sha256(blob).hexdigest()
+    print(f"wrote {target} ({width}x{height}, {len(blob)} bytes, "
+          f"sha256 {digest})")
     return 0
 
 
